@@ -78,7 +78,7 @@ class Secrets(Resource):
 				return {"status": "success", "message": "Added secret to key " + args["key"]}
 			else:
 				key = generate_key()
-				sql = "INSERT INTO secrets (id, prime_secret) VALUES (%s, %s)"
+				sql = "INSERT INTO secrets (id, first_secret) VALUES (%s, %s)"
 				cursor.execute(sql, (key, args["secret"]))
 				cursor.connection.commit()
 				return {"status": "success", "message": "Added secret", "key": key}, 200
