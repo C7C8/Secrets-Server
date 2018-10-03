@@ -1,14 +1,18 @@
 #!/usr/bin/python3
+import base64
 import random
 import string
 import sys
 from json import loads
 
+import bcrypt
+import nltk
+import pymysql
 from flask import Flask, Blueprint
 from flask_restplus import Api, Resource, reqparse
-import nltk
 from nltk.corpus import stopwords
-import pymysql
+from cryptography.fernet import Fernet
+
 stop_words = set(stopwords.words('english'))
 
 
@@ -50,7 +54,36 @@ def generate_key():
 	guarantee that probability of a collision is negligible, but the key is easily readable and sharable.
 
 	Yes, I'm still lazy."""
-	return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+	return ''.join(random.choices(string.ascii_uppercase + string.ascii_lowercase + string.digits, k=12))
+
+
+def hash_key(key):
+	"""RED ALERT! BAD CRYPTO!
+
+	So... there's a kinda good reason for this. We want to be able to hash the key so we can perform lookups using the
+	hash, while the actual encryption key remains unknown. That means we have to be able to generate this hash on the
+	fly and feed it to the db to use as a primary key, which we can't do if the salt is randomized each time we hash the
+	key generated for the user. Hence, the constant salt. Yes, this is a bad thing and it does weaken the security here,
+	but we need it. It's still better than using a fast hashing algorithm like sha3-512 (which was also considered).
+
+	Also, I'm STILL lazy. This is just here because I don't want to keep copying that salt everywhere."""
+	return bcrypt.hashpw(key.encode('utf-8'), "$2a$12$V5udsWyGOcr6RouVN/.Bc.")
+
+
+def encrypt(message, key):
+	"""Encrypt a message with Fernet -- 128-bit CBC AES"""
+	# Must pad the key so Fernet doesn't throw a hissy fit
+	key = base64.urlsafe_b64encode((key + 'aaaaaaaaaaaaaaaaaaaa').encode('utf-8'))
+	f = Fernet(key)
+	return f.encrypt(message.encode('utf-8'))
+
+
+def decrypt(message, key):
+	"""Decrypt a message"""
+	# Must pad the key so Fernet doesn't throw a hissy fit.
+	key = base64.urlsafe_b64encode((key + 'aaaaaaaaaaaaaaaaaaaa').encode('utf-8'))
+	f = Fernet(key)
+	return f.decrypt(message.encode('utf-8')).decode('utf-8')
 
 
 @ns.route("/secrets")
@@ -67,19 +100,24 @@ class Secrets(Resource):
 		with connect_db(**conf) as cursor:
 			if args["key"] is not None:
 				# Put second secret in database, but check if the secret key exists first. If it doesn't, error.
+				hkey = hash_key(args["key"])
+				secret = encrypt(args["secret"], args["key"])
+
 				sql = "SELECT id FROM secrets WHERE id=%s"
-				cursor.execute(sql, args["key"])
+				cursor.execute(sql, hkey)
 				if cursor.fetchone() is None:
 					return {"status": "error", "message": "Provided key does not match an existing key"}, 404
 
 				sql = "UPDATE secrets SET second_secret=%s WHERE id=%s"
-				cursor.execute(sql, (args["secret"], args["key"]))
+				cursor.execute(sql, (secret, hkey))
 				cursor.connection.commit()
 				return {"status": "success", "message": "Added secret to key " + args["key"]}
 			else:
 				key = generate_key()
+				hkey = hash_key(key)
+				secret = encrypt(args["secret"], key)
 				sql = "INSERT INTO secrets (id, first_secret) VALUES (%s, %s)"
-				cursor.execute(sql, (key, args["secret"]))
+				cursor.execute(sql, (hkey, secret))
 				cursor.connection.commit()
 				return {"status": "success", "message": "Added secret", "key": key}, 200
 
@@ -92,13 +130,14 @@ class Secrets(Resource):
 		with connect_db(**conf) as cursor:
 			# Check if the provided key matches an existing key or not. Technically we don't need to do this, but it's
 			# useful to provide the user with a better status message
+			hkey = hash_key(args["key"])
 			sql = "SELECT id FROM secrets WHERE id=%s"
-			cursor.execute(sql, args["key"])
+			cursor.execute(sql, hkey)
 			if cursor.fetchone() is None:
 				return {"status": "error", "message": "Provided key does not match an existing key"}, 404
 
 			sql = "DELETE FROM secrets WHERE id=%s"
-			cursor.execute(sql, args["key"])
+			cursor.execute(sql, hkey)
 			cursor.connection.commit()
 			return {"status": "success", "message": "Deleted secret " + args["key"]}
 
@@ -111,14 +150,14 @@ class Secrets(Resource):
 
 		with connect_db(**conf) as cursor:
 			sql = "SELECT * FROM secrets WHERE id=%s"
-			cursor.execute(sql, args["key"])
+			cursor.execute(sql, hash_key(args["key"]))
 			res = cursor.fetchone()
 			if res is None:
 				return {"status": "error", "message": "Provided key does not match an existing key"}, 404
 
 			lemmatizer = nltk.WordNetLemmatizer()
-			secret1 = res[1].lower()
-			secret2 = res[2].lower()
+			secret1 = decrypt(res[1], args["key"])
+			secret2 = decrypt(res[2], args["key"])
 			secret1_tokenized = set(lemmatizer.lemmatize(t) for t in nltk.tokenize.casual_tokenize(secret1))
 			secret2_tokenized = set(lemmatizer.lemmatize(t) for t in nltk.tokenize.casual_tokenize(secret2))
 

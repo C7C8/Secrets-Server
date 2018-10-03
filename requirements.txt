@@ -3,3 +3,5 @@ flask-restplus==0.11.0
 PyMySQL==0.8.1
 nltk==3.3
 six==1.11.0
+py-bcrypt==0.4
+cryptography==2.3.1
