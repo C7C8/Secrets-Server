@@ -154,6 +154,8 @@ class Secrets(Resource):
 			res = cursor.fetchone()
 			if res is None:
 				return {"status": "error", "message": "Provided key does not match an existing key"}, 404
+			if res[2] is None:
+				return {"status": "error", "message": "Secret incomplete! Your partner must submit a secret before analysis can proceeed."}
 
 			lemmatizer = nltk.WordNetLemmatizer()
 			secret1 = decrypt(res[1], args["key"])
